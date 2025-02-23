@@ -1,0 +1,153 @@
+# Importar librerías necesarias
+import cv2
+import numpy as np
+from ultralytics import YOLO
+
+# ---------------------------------------------
+# Configuración de colores (en formato BGR)
+# ---------------------------------------------
+COLOR_HEAD = (0, 255, 0)       # Verde para la cabeza
+COLOR_TRUNK = (0, 165, 255)    # Naranja para el tronco
+COLOR_ARMS = (255, 0, 0)       # Azul para los brazos
+COLOR_LEGS = (0, 0, 255)       # Rojo para las piernas
+COLOR_BORDER = (0, 0, 0)       # Negro para el borde
+COLOR_LINE = (0, 255, 0)       # Verde para las conexiones (BGR)
+
+# ---------------------------------------------
+# Definición de conexiones entre keypoints (esqueleto COCO)
+# ---------------------------------------------
+connections = [
+    # Torso
+    (5, 6), (5, 11), (6, 12), (11, 12),
+    # Brazos
+    (5, 7), (7, 9), (6, 8), (8, 10),
+    # Piernas
+    (11, 13), (13, 15), (12, 14), (14, 16),
+    # Cabeza con centro de gravedad
+    (0, 17)
+]
+
+# ---------------------------------------------
+# Diccionario de nombres para cada keypoint (estándar COCO)
+# ---------------------------------------------
+keypoint_names = {
+    0: "Nose",
+    5: "Left Shoulder",
+    6: "Right Shoulder",
+    7: "Left Elbow",
+    8: "Right Elbow",
+    9: "Left Wrist",
+    10: "Right Wrist",
+    11: "Left Hip",
+    12: "Right Hip",
+    13: "Left Knee",
+    14: "Right Knee",
+    15: "Left Ankle",
+    16: "Right Ankle",
+    17: "Center of Gravity"
+}
+
+# ---------------------------------------------
+# Grupos de keypoints
+# ---------------------------------------------
+trunk_points = [5, 6, 11, 12]
+arms_points = [7, 8, 9, 10]
+legs_points = [13, 14, 15, 16]
+
+# ---------------------------------------------
+# Función para dibujar keypoints
+# ---------------------------------------------
+def draw_keypoint(frame, coord, kp_index, color):
+    x, y = int(coord[0]), int(coord[1])
+    radius = 5
+    cv2.circle(frame, (x, y), radius, color, -1)
+    cv2.circle(frame, (x, y), radius, COLOR_BORDER, 1)
+    label = keypoint_names.get(kp_index, str(kp_index))
+    cv2.putText(frame, label, (x - 10, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+# ---------------------------------------------
+# Cargar modelo y configurar video
+# ---------------------------------------------
+model = YOLO("yolo11x-pose.pt")
+input_path = "/content/Guerrero.mp4"
+output_path = "annotated_Guerrero.mp4"
+
+cap = cv2.VideoCapture(input_path)
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = cap.get(cv2.CAP_PROP_FPS)
+
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+
+# ---------------------------------------------
+# Procesamiento de video
+# ---------------------------------------------
+frame_count = 0
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    results = model(frame, conf=0.4)
+
+    for result in results:
+        if result.keypoints is None:
+            continue
+
+        num_persons = len(result.keypoints.xy)
+        for i in range(num_persons):
+            kps = result.keypoints.xy[i].cpu().numpy()
+            confs = result.keypoints.conf[i].cpu().numpy()
+
+            # Calcular el centro de gravedad
+            center_of_gravity = np.mean(kps[5:13], axis=0)
+            kps = np.vstack([kps, center_of_gravity])
+
+            # Dibujar conexiones primero
+            for (start_idx, end_idx) in connections:
+                if start_idx >= len(confs) or end_idx >= len(confs):
+                    continue
+                    
+                if confs[start_idx] >= 0.3 and confs[end_idx] >= 0.3:
+                    x1, y1 = map(int, kps[start_idx])
+                    x2, y2 = map(int, kps[end_idx])
+                    cv2.line(frame, (x1, y1), (x2, y2), COLOR_LINE, 2)
+
+            # Dibujar keypoints
+            for idx, (x, y) in enumerate(kps):
+                if idx == 17 or confs[idx] >= 0.3:
+                    if idx in trunk_points:
+                        color = COLOR_TRUNK
+                    elif idx in arms_points:
+                        color = COLOR_ARMS
+                    elif idx in legs_points:
+                        color = COLOR_LEGS
+                    else:
+                        color = (255, 255, 255)
+
+                    draw_keypoint(frame, (x, y), idx, color)
+
+            # Dibujar y etiquetar el centro de gravedad
+            cv2.circle(frame, (int(center_of_gravity[0]), int(center_of_gravity[1])), 10, (255, 255, 0), -1)
+            cv2.putText(frame, "CoG", (int(center_of_gravity[0]) - 10, int(center_of_gravity[1]) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_BORDER, 1, cv2.LINE_AA)
+
+            # Identificar la pose (simplificado, ajustar según sea necesario)
+            pose_name = "Nombre pose: Guerrero"
+            pose_duration = frame_count / fps
+            person_height_cm = int(np.linalg.norm(kps[11] - kps[15]) * 0.0264)  # Convertir pixeles a cm (suponiendo una relación de 0.0264 cm/px)
+
+            # Dibujar información de la pose en el cuadro superior izquierdo
+            info_text = f"{pose_name}\nDuracion: {pose_duration:.2f} s\nAltura: {person_height_cm} cm"
+            y0, dy = 30, 20
+            for i, line in enumerate(info_text.split('\n')):
+                y = y0 + i*dy
+                cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, COLOR_BORDER, 1, cv2.LINE_AA)
+
+    out.write(frame)
+    frame_count += 1
+    print(f"Procesando frame {frame_count}", end="\r")
+
+cap.release()
+out.release()
+print("\nProcesamiento completo. Video guardado en:", output_path)
